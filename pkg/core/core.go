@@ -24,10 +24,12 @@ func Run(ctx context.Context, cfg *BackupConfig) error {
 	if err != nil {
 		return err
 	}
+	defer srcFS.Close()
 	destFS, err := buildFS(&cfg.Dest)
 	if err != nil {
 		return err
 	}
+	defer destFS.Close()
 
 	store := meta.NewStore(destFS)
 	lastSnap, err := store.LoadLatest()

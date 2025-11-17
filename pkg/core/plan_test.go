@@ -31,3 +31,27 @@ func TestBuildPlanIncr(t *testing.T) {
 		t.Fatalf("expected 2 plan items, got %d", len(plan.Items))
 	}
 }
+
+func TestShouldSkipWithChecksum(t *testing.T) {
+	oldMeta := endpoint.FileMeta{
+		RelPath:  "a.txt",
+		Size:     10,
+		ModTime:  time.Unix(1, 0),
+		Checksum: "abc",
+	}
+	newMeta := endpoint.FileMeta{
+		RelPath:  "a.txt",
+		Size:     10,
+		ModTime:  time.Unix(1, 0),
+		Checksum: "abc",
+	}
+	last := &meta.Snapshot{Files: map[string]endpoint.FileMeta{"a.txt": oldMeta}}
+	cfg := BackupConfig{Mode: endpoint.ModeIncr, Checksum: endpoint.ChecksumSHA256}
+	if !shouldSkip("a.txt", newMeta, last, cfg) {
+		t.Fatalf("should skip identical checksum")
+	}
+	newMeta.Checksum = "def"
+	if shouldSkip("a.txt", newMeta, last, cfg) {
+		t.Fatalf("should not skip when checksum differs")
+	}
+}

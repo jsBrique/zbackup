@@ -3,11 +3,16 @@ package endpoint
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha1"
 	"fmt"
 	"io"
 	"io/fs"
+	"math"
+	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -15,12 +20,20 @@ import (
 
 // RemoteFS 使用 ssh 在远端执行命令
 type RemoteFS struct {
-	endpoint Endpoint
+	endpoint    Endpoint
+	controlPath string
 }
 
 // NewRemoteFS 创建远端文件系统
 func NewRemoteFS(ep Endpoint) *RemoteFS {
-	return &RemoteFS{endpoint: ep}
+	control := ""
+	if supportsControlMaster() {
+		control = buildControlPath(ep)
+	}
+	return &RemoteFS{
+		endpoint:    ep,
+		controlPath: control,
+	}
 }
 
 func (r *RemoteFS) Root() string {
@@ -28,43 +41,42 @@ func (r *RemoteFS) Root() string {
 }
 
 func (r *RemoteFS) List(excludes []string) ([]FileMeta, error) {
+	metas, unsupported, err := r.listWithFindPrintf(excludes)
+	if err == nil {
+		return metas, nil
+	}
+	if unsupported {
+		return r.listWithFindStat(excludes)
+	}
+	return nil, err
+}
+
+func (r *RemoteFS) listWithFindPrintf(excludes []string) ([]FileMeta, bool, error) {
 	script := fmt.Sprintf("cd %s && find . -type f -printf '%%P|%%s|%%T@|%%m\\n'", shellQuote(r.endpoint.Path))
 	output, err := r.runSSHCommand(script)
 	if err != nil {
-		return nil, err
+		if isFindPrintfUnsupported(output) {
+			return nil, true, fmt.Errorf("远端 find 不支持 -printf")
+		}
+		return nil, false, fmt.Errorf("远端列举失败: %w: %s", err, string(output))
 	}
-	var metas []FileMeta
-	scanner := bufio.NewScanner(bytes.NewReader(output))
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
-		}
-		parts := strings.Split(line, "|")
-		if len(parts) < 4 {
-			continue
-		}
-		rel := parts[0]
-		if rel == "" || rel == "." {
-			continue
-		}
-		if shouldExclude(rel, excludes) {
-			continue
-		}
-		size, _ := strconv.ParseInt(parts[1], 10, 64)
-		modEpoch, _ := strconv.ParseFloat(parts[2], 64)
-		mode64, _ := strconv.ParseUint(parts[3], 8, 32)
-		metas = append(metas, FileMeta{
-			RelPath: rel,
-			Size:    size,
-			Mode:    uint32(mode64),
-			ModTime: time.Unix(int64(modEpoch), 0),
-		})
+	metas, err := parseRemoteListOutput(output, excludes)
+	return metas, false, err
+}
+
+func (r *RemoteFS) listWithFindStat(excludes []string) ([]FileMeta, error) {
+	script := fmt.Sprintf(`cd %[1]s && find . -type f -print0 | while IFS= read -r -d '' file; do
+rel="${file#./}"
+[ -z "$rel" ] && continue
+stat_out=$(stat -c '%%s|%%Y|%%f' "$file" 2>/dev/null || stat -f '%%z|%%m|%%p' "$file" 2>/dev/null)
+[ -z "$stat_out" ] && continue
+printf '%%s|%%s\n' "$rel" "$stat_out"
+done`, shellQuote(r.endpoint.Path))
+	output, err := r.runSSHCommand(script)
+	if err != nil {
+		return nil, fmt.Errorf("远端列举失败: %w: %s", err, string(output))
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-	return metas, nil
+	return parseRemoteListOutput(output, excludes)
 }
 
 func (r *RemoteFS) Open(relPath string) (io.ReadCloser, error) {
@@ -83,7 +95,7 @@ func (r *RemoteFS) Open(relPath string) (io.ReadCloser, error) {
 func (r *RemoteFS) Create(relPath string, perm fs.FileMode) (io.WriteCloser, error) {
 	remote := path.Join(r.endpoint.Path, filepathToPosix(relPath))
 	dir := path.Dir(remote)
-	script := fmt.Sprintf("set -euo pipefail; mkdir -p %s; cat > %s; chmod %04o %s",
+	script := fmt.Sprintf("mkdir -p %s && cat > %s && chmod %04o %s",
 		shellQuote(dir), shellQuote(remote), perm&0o777, shellQuote(remote))
 	cmd := r.sshCommand(script)
 	stdin, err := cmd.StdinPipe()
@@ -110,7 +122,7 @@ func (r *RemoteFS) Remove(relPath string) error {
 
 func (r *RemoteFS) Stat(relPath string) (FileMeta, error) {
 	remote := path.Join(r.endpoint.Path, filepathToPosix(relPath))
-	script := fmt.Sprintf("stat -c '%%s|%%Y|%%f' %s", shellQuote(remote))
+	script := fmt.Sprintf("stat -c '%%s|%%Y|%%f' %s 2>/dev/null || stat -f '%%z|%%m|%%p' %s", shellQuote(remote), shellQuote(remote))
 	out, err := r.runSSHCommand(script)
 	if err != nil {
 		return FileMeta{}, err
@@ -121,13 +133,13 @@ func (r *RemoteFS) Stat(relPath string) (FileMeta, error) {
 		return FileMeta{}, fmt.Errorf("stat output invalid: %s", line)
 	}
 	size, _ := strconv.ParseInt(parts[0], 10, 64)
-	mod, _ := strconv.ParseInt(parts[1], 10, 64)
-	mode, _ := strconv.ParseUint(parts[2], 16, 32)
+	mod := parseEpoch(parts[1])
+	mode := parseMode(parts[2])
 	return FileMeta{
 		RelPath: relPath,
 		Size:    size,
-		Mode:    uint32(mode),
-		ModTime: time.Unix(mod, 0),
+		Mode:    mode,
+		ModTime: mod,
 	}, nil
 }
 
@@ -137,11 +149,31 @@ func (r *RemoteFS) runSSHCommand(cmd string) ([]byte, error) {
 }
 
 func (r *RemoteFS) sshCommand(cmd string) *exec.Cmd {
-	args := buildSSHArgs(r.endpoint, cmd)
+	args := buildSSHArgs(r.endpoint, r.controlPath, cmd)
 	return exec.Command("ssh", args...)
 }
 
-func buildSSHArgs(ep Endpoint, remoteCmd string) []string {
+func buildSSHArgs(ep Endpoint, controlPath, remoteCmd string) []string {
+	args := baseSSHArgs(ep, controlPath)
+	args = append(args, targetHost(ep), remoteCmd)
+	return args
+}
+
+func shellQuote(val string) string {
+	return "'" + strings.ReplaceAll(val, "'", `'\''`) + "'"
+}
+
+func filepathToPosix(rel string) string {
+	return strings.ReplaceAll(rel, "\\", "/")
+}
+
+func buildControlPath(ep Endpoint) string {
+	sum := sha1.Sum([]byte(fmt.Sprintf("%s@%s:%s-%d", ep.User, ep.Host, ep.Path, time.Now().UnixNano())))
+	name := fmt.Sprintf("zbackup-ssh-%x.sock", sum[:6])
+	return filepath.Join(os.TempDir(), name)
+}
+
+func baseSSHArgs(ep Endpoint, controlPath string) []string {
 	var args []string
 	if ep.SSHOpts.Identity != "" {
 		args = append(args, "-i", ep.SSHOpts.Identity)
@@ -155,20 +187,40 @@ func buildSSHArgs(ep Endpoint, remoteCmd string) []string {
 		}
 		args = append(args, "-o", extra)
 	}
+	if controlPath != "" {
+		args = append(args,
+			"-o", "ControlMaster=auto",
+			"-o", fmt.Sprintf("ControlPath=%s", controlPath),
+			"-o", "ControlPersist=600",
+		)
+	}
+	return args
+}
+
+func targetHost(ep Endpoint) string {
 	target := ep.Host
 	if ep.User != "" {
 		target = fmt.Sprintf("%s@%s", ep.User, ep.Host)
 	}
-	args = append(args, target, remoteCmd)
-	return args
+	return target
 }
 
-func shellQuote(val string) string {
-	return "'" + strings.ReplaceAll(val, "'", `'\''`) + "'"
-}
-
-func filepathToPosix(rel string) string {
-	return strings.ReplaceAll(rel, "\\", "/")
+// Close 关闭 SSH 控制连接
+func (r *RemoteFS) Close() error {
+	if r.controlPath == "" {
+		return nil
+	}
+	args := baseSSHArgs(r.endpoint, "")
+	args = append(args, "-S", r.controlPath, "-O", "exit", targetHost(r.endpoint))
+	cmd := exec.Command("ssh", args...)
+	if err := cmd.Run(); err != nil {
+		if strings.Contains(err.Error(), "No such file or directory") || strings.Contains(err.Error(), "No control socket") {
+			return nil
+		}
+		return err
+	}
+	_ = os.Remove(r.controlPath)
+	return nil
 }
 
 type cmdReadCloser struct {
@@ -201,4 +253,97 @@ func (c *cmdWriteCloser) Close() error {
 		return err
 	}
 	return c.Cmd.Wait()
+}
+
+func parseRemoteListOutput(output []byte, excludes []string) ([]FileMeta, error) {
+	var metas []FileMeta
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	for scanner.Scan() {
+		line := scanner.Text()
+		meta, ok := parseRemoteLine(line)
+		if !ok {
+			continue
+		}
+		if shouldExclude(meta.RelPath, excludes) {
+			continue
+		}
+		metas = append(metas, meta)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return metas, nil
+}
+
+func parseRemoteLine(line string) (FileMeta, bool) {
+	if strings.TrimSpace(line) == "" {
+		return FileMeta{}, false
+	}
+	parts := strings.Split(line, "|")
+	if len(parts) < 4 {
+		return FileMeta{}, false
+	}
+	rel := strings.TrimPrefix(parts[0], "./")
+	if rel == "" || rel == "." {
+		return FileMeta{}, false
+	}
+	size, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return FileMeta{}, false
+	}
+	mod := parseEpoch(parts[2])
+	mode := parseMode(parts[3])
+	return FileMeta{
+		RelPath: rel,
+		Size:    size,
+		Mode:    mode,
+		ModTime: mod,
+	}, true
+}
+
+func parseEpoch(val string) time.Time {
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return time.Unix(0, 0)
+	}
+	if strings.Contains(val, ".") {
+		if f, err := strconv.ParseFloat(val, 64); err == nil {
+			sec, frac := math.Modf(f)
+			return time.Unix(int64(sec), int64(frac*1e9))
+		}
+	}
+	if i, err := strconv.ParseInt(val, 10, 64); err == nil {
+		return time.Unix(i, 0)
+	}
+	return time.Unix(0, 0)
+}
+
+func parseMode(val string) uint32 {
+	val = strings.TrimSpace(val)
+	if val == "" {
+		return 0
+	}
+	if v, err := strconv.ParseUint(val, 8, 32); err == nil {
+		return uint32(v)
+	}
+	if v, err := strconv.ParseUint(val, 16, 32); err == nil {
+		return uint32(v)
+	}
+	if v, err := strconv.ParseUint(val, 10, 32); err == nil {
+		return uint32(v)
+	}
+	return 0
+}
+
+func isFindPrintfUnsupported(output []byte) bool {
+	if len(output) == 0 {
+		return false
+	}
+	text := strings.ToLower(string(output))
+	return strings.Contains(text, "-printf") || strings.Contains(text, "unknown predicate") || strings.Contains(text, "busybox")
+}
+
+func supportsControlMaster() bool {
+	// Windows 版 OpenSSH 尚未实现控制主连接
+	return runtime.GOOS != "windows"
 }

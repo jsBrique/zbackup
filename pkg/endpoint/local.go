@@ -92,3 +92,7 @@ func (l *LocalFS) Stat(relPath string) (FileMeta, error) {
 		ModTime: info.ModTime(),
 	}, nil
 }
+
+func (l *LocalFS) Close() error {
+	return nil
+}

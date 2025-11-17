@@ -15,6 +15,7 @@ type FileSystem interface {
 	MkdirAll(relPath string) error
 	Remove(relPath string) error
 	Stat(relPath string) (FileMeta, error)
+	Close() error
 }
 
 // ErrNotImplemented 用于表示某些操作尚未支持
