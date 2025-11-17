@@ -10,6 +10,7 @@ const (
 	ActionDownload TransferAction = "download"
 	ActionDelete   TransferAction = "delete"
 	ActionSkip     TransferAction = "skip"
+	ActionMkdir    TransferAction = "mkdir"
 )
 
 // TransferItem 表示一次对单个文件的操作
@@ -30,7 +31,7 @@ type Plan struct {
 // AddItem 加入计划
 func (p *Plan) AddItem(item TransferItem) {
 	p.Items = append(p.Items, item)
-	if item.Action == ActionDelete || item.Action == ActionSkip {
+	if item.Action == ActionDelete || item.Action == ActionSkip || item.Action == ActionMkdir {
 		return
 	}
 	p.TotalFiles++

@@ -9,4 +9,5 @@ type FileMeta struct {
 	Mode     uint32    `json:"mode"`
 	ModTime  time.Time `json:"mod_time"`
 	Checksum string    `json:"checksum,omitempty"`
+	IsDir    bool      `json:"is_dir"`
 }

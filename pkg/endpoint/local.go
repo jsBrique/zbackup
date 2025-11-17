@@ -28,12 +28,12 @@ func (l *LocalFS) List(excludes []string) ([]FileMeta, error) {
 		if err != nil {
 			return err
 		}
-		if entry.IsDir() {
-			return nil
-		}
 		rel, err := filepath.Rel(l.root, fullPath)
 		if err != nil {
 			return err
+		}
+		if rel == "." {
+			return nil
 		}
 		if shouldExclude(rel, excludes) {
 			return nil
@@ -42,12 +42,17 @@ func (l *LocalFS) List(excludes []string) ([]FileMeta, error) {
 		if err != nil {
 			return err
 		}
-		metas = append(metas, FileMeta{
+		meta := FileMeta{
 			RelPath: rel,
 			Size:    info.Size(),
 			Mode:    uint32(info.Mode()),
 			ModTime: info.ModTime(),
-		})
+			IsDir:   info.IsDir(),
+		}
+		if info.IsDir() {
+			meta.Size = 0
+		}
+		metas = append(metas, meta)
 		return nil
 	})
 	if err != nil {
@@ -90,6 +95,7 @@ func (l *LocalFS) Stat(relPath string) (FileMeta, error) {
 		Size:    info.Size(),
 		Mode:    uint32(info.Mode()),
 		ModTime: info.ModTime(),
+		IsDir:   info.IsDir(),
 	}, nil
 }
 

@@ -6,7 +6,7 @@ import (
 )
 
 func TestParseRemoteLine(t *testing.T) {
-	line := "dir/file.txt|123|1700000000.5|755"
+	line := "dir/file.txt|123|1700000000.5|755|f"
 	meta, ok := parseRemoteLine(line)
 	if !ok {
 		t.Fatalf("line should parse")
@@ -26,7 +26,7 @@ func TestParseRemoteLine(t *testing.T) {
 }
 
 func TestParseRemoteListOutputExclude(t *testing.T) {
-	data := []byte("foo.txt|10|1700000000|644\nbar.tmp|11|1700000001|644\n")
+	data := []byte("foo.txt|10|1700000000|644|f\nbar.tmp|11|1700000001|644|f\n")
 	metas, err := parseRemoteListOutput(data, []string{"*.tmp"})
 	if err != nil {
 		t.Fatalf("parse failed: %v", err)

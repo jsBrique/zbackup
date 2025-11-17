@@ -17,7 +17,10 @@ func TestExecutorExecute(t *testing.T) {
 	srcDir := t.TempDir()
 	dstDir := t.TempDir()
 	content := []byte("hello world")
-	if err := os.WriteFile(filepath.Join(srcDir, "file.txt"), content, 0o644); err != nil {
+	if err := os.MkdirAll(filepath.Join(srcDir, "sub"), 0o755); err != nil {
+		t.Fatalf("make dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "sub", "file.txt"), content, 0o644); err != nil {
 		t.Fatalf("write src: %v", err)
 	}
 	srcFS := endpoint.NewLocalFS(srcDir)
@@ -33,9 +36,17 @@ func TestExecutorExecute(t *testing.T) {
 	}
 	plan := Plan{}
 	plan.AddItem(TransferItem{
-		RelPath: "file.txt",
+		RelPath: "sub",
 		Meta: endpoint.FileMeta{
-			RelPath: "file.txt",
+			RelPath: "sub",
+			IsDir:   true,
+		},
+		Action: ActionMkdir,
+	})
+	plan.AddItem(TransferItem{
+		RelPath: "sub/file.txt",
+		Meta: endpoint.FileMeta{
+			RelPath: "sub/file.txt",
 			Size:    int64(len(content)),
 			ModTime: time.Now(),
 		},
@@ -45,10 +56,13 @@ func TestExecutorExecute(t *testing.T) {
 	if err != nil {
 		t.Fatalf("execute failed: %v", err)
 	}
-	if _, ok := result.Success["file.txt"]; !ok {
+	if _, ok := result.Success["sub/file.txt"]; !ok {
 		t.Fatalf("file not marked success")
 	}
-	data, err := os.ReadFile(filepath.Join(dstDir, "file.txt"))
+	if _, err := os.Stat(filepath.Join(dstDir, "sub")); err != nil {
+		t.Fatalf("dir not created: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dstDir, "sub", "file.txt"))
 	if err != nil {
 		t.Fatalf("read dest failed: %v", err)
 	}

@@ -52,7 +52,7 @@ func (r *RemoteFS) List(excludes []string) ([]FileMeta, error) {
 }
 
 func (r *RemoteFS) listWithFindPrintf(excludes []string) ([]FileMeta, bool, error) {
-	script := fmt.Sprintf("cd %s && find . -type f -printf '%%P|%%s|%%T@|%%m\\n'", shellQuote(r.endpoint.Path))
+	script := fmt.Sprintf("cd %s && find . -mindepth 1 -printf '%%P|%%s|%%T@|%%m|%%y\\n'", shellQuote(r.endpoint.Path))
 	output, err := r.runSSHCommand(script)
 	if err != nil {
 		if isFindPrintfUnsupported(output) {
@@ -65,12 +65,13 @@ func (r *RemoteFS) listWithFindPrintf(excludes []string) ([]FileMeta, bool, erro
 }
 
 func (r *RemoteFS) listWithFindStat(excludes []string) ([]FileMeta, error) {
-	script := fmt.Sprintf(`cd %[1]s && find . -type f -print0 | while IFS= read -r -d '' file; do
+	script := fmt.Sprintf(`cd %[1]s && find . -mindepth 1 -print0 | while IFS= read -r -d '' file; do
 rel="${file#./}"
 [ -z "$rel" ] && continue
 stat_out=$(stat -c '%%s|%%Y|%%f' "$file" 2>/dev/null || stat -f '%%z|%%m|%%p' "$file" 2>/dev/null)
 [ -z "$stat_out" ] && continue
-printf '%%s|%%s\n' "$rel" "$stat_out"
+if [ -d "$file" ]; then type="d"; else type="f"; fi
+printf '%%s|%%s|%%s\n' "$rel" "$stat_out" "$type"
 done`, shellQuote(r.endpoint.Path))
 	output, err := r.runSSHCommand(script)
 	if err != nil {
@@ -122,24 +123,26 @@ func (r *RemoteFS) Remove(relPath string) error {
 
 func (r *RemoteFS) Stat(relPath string) (FileMeta, error) {
 	remote := path.Join(r.endpoint.Path, filepathToPosix(relPath))
-	script := fmt.Sprintf("stat -c '%%s|%%Y|%%f' %s 2>/dev/null || stat -f '%%z|%%m|%%p' %s", shellQuote(remote), shellQuote(remote))
+	script := fmt.Sprintf("stat -c '%%s|%%Y|%%f|%%F' %s 2>/dev/null || stat -f '%%z|%%m|%%p|%%HT' %s", shellQuote(remote), shellQuote(remote))
 	out, err := r.runSSHCommand(script)
 	if err != nil {
 		return FileMeta{}, err
 	}
 	line := strings.TrimSpace(string(out))
 	parts := strings.Split(line, "|")
-	if len(parts) < 3 {
+	if len(parts) < 4 {
 		return FileMeta{}, fmt.Errorf("stat output invalid: %s", line)
 	}
 	size, _ := strconv.ParseInt(parts[0], 10, 64)
 	mod := parseEpoch(parts[1])
 	mode := parseMode(parts[2])
+	isDir := strings.Contains(strings.ToLower(parts[3]), "directory")
 	return FileMeta{
 		RelPath: relPath,
 		Size:    size,
 		Mode:    mode,
 		ModTime: mod,
+		IsDir:   isDir,
 	}, nil
 }
 
@@ -280,7 +283,7 @@ func parseRemoteLine(line string) (FileMeta, bool) {
 		return FileMeta{}, false
 	}
 	parts := strings.Split(line, "|")
-	if len(parts) < 4 {
+	if len(parts) < 5 {
 		return FileMeta{}, false
 	}
 	rel := strings.TrimPrefix(parts[0], "./")
@@ -293,11 +296,13 @@ func parseRemoteLine(line string) (FileMeta, bool) {
 	}
 	mod := parseEpoch(parts[2])
 	mode := parseMode(parts[3])
+	isDir := strings.TrimSpace(parts[4]) == "d"
 	return FileMeta{
 		RelPath: rel,
 		Size:    size,
 		Mode:    mode,
 		ModTime: mod,
+		IsDir:   isDir,
 	}, true
 }
 

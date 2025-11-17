@@ -61,6 +61,15 @@ func (e *Executor) Execute(ctx context.Context, plan Plan) (Result, error) {
 			if err := e.DestFS.Remove(item.RelPath); err != nil {
 				e.Logger.Warn("删除失败", "path", item.RelPath, "err", err)
 			}
+		case ActionMkdir:
+			if err := e.DestFS.MkdirAll(item.RelPath); err != nil {
+				e.Logger.Error("创建目录失败", "path", item.RelPath, "err", err)
+				errs = append(errs, err)
+				result.Failed[item.RelPath] = err
+			} else {
+				result.Success[item.RelPath] = item.Meta
+				e.Logger.Debug("创建目录成功", "path", item.RelPath)
+			}
 		case ActionSkip:
 			e.Logger.Debug("跳过未变化文件", "path", item.RelPath, "reason", item.Reason)
 		}
