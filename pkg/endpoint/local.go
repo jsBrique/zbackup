@@ -35,6 +35,7 @@ func (l *LocalFS) List(excludes []string) ([]FileMeta, error) {
 		if rel == "." {
 			return nil
 		}
+		rel = filepath.ToSlash(rel)
 		if shouldExclude(rel, excludes) {
 			return nil
 		}
@@ -90,8 +91,9 @@ func (l *LocalFS) Stat(relPath string) (FileMeta, error) {
 	if err != nil {
 		return FileMeta{}, fmt.Errorf("stat %s: %w", relPath, err)
 	}
+	cleanRel := filepath.ToSlash(relPath)
 	return FileMeta{
-		RelPath: relPath,
+		RelPath: cleanRel,
 		Size:    info.Size(),
 		Mode:    uint32(info.Mode()),
 		ModTime: info.ModTime(),

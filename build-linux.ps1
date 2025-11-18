@@ -1,6 +1,6 @@
 # 在 PowerShell 中执行该脚本，即可编译 Linux/AMD64 版本
 param(
-    [string]$Output = "build/zbackup-linux-amd64"
+    [string]$Output = "build/zbackup"
 )
 
 $ErrorActionPreference = "Stop"

@@ -6,12 +6,12 @@ import (
 )
 
 func TestParseRemoteLine(t *testing.T) {
-	line := "dir/file.txt|123|1700000000.5|755|f"
+	line := "dir/测试 文件.txt|123|1700000000.5|755|f"
 	meta, ok := parseRemoteLine(line)
 	if !ok {
 		t.Fatalf("line should parse")
 	}
-	if meta.RelPath != "dir/file.txt" {
+	if meta.RelPath != "dir/测试 文件.txt" {
 		t.Fatalf("unexpected rel path %s", meta.RelPath)
 	}
 	if meta.Size != 123 {

@@ -16,10 +16,11 @@ func shouldExclude(rel string, patterns []string) bool {
 		if p == "" {
 			continue
 		}
-		if matched, _ := filepath.Match(p, norm); matched {
+		pattern := filepath.ToSlash(p)
+		if matched, _ := filepath.Match(pattern, norm); matched {
 			return true
 		}
-		if matched, _ := filepath.Match(p, filepath.Base(norm)); matched {
+		if matched, _ := filepath.Match(pattern, filepath.Base(norm)); matched {
 			return true
 		}
 	}
