@@ -17,6 +17,7 @@ const (
 	metaDir       = ".zbackup"
 	snapshotDir   = "snapshots"
 	latestSymlink = "latest"
+	pendingFile   = "pending.json"
 )
 
 // Snapshot 描述一次备份的结果
@@ -98,6 +99,54 @@ func (s *Store) Save(snap Snapshot) error {
 		return err
 	}
 	if err := s.writeFile(filepath.Join(metaDir, latestSymlink), []byte(snap.Name+"\n"), 0o644); err != nil {
+		return err
+	}
+	return nil
+}
+
+// SavePending 保存未完成快照
+func (s *Store) SavePending(snap Snapshot) error {
+	if snap.Files == nil {
+		snap.Files = make(map[string]endpoint.FileMeta)
+	}
+	snap.Completed = false
+	data, err := json.MarshalIndent(snap, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := s.fs.MkdirAll(metaDir); err != nil {
+		return err
+	}
+	writer, err := s.fs.Create(filepath.Join(metaDir, pendingFile), 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := writer.Write(data); err != nil {
+		writer.Close()
+		return err
+	}
+	return writer.Close()
+}
+
+// LoadPending 读取未完成快照
+func (s *Store) LoadPending() (*Snapshot, error) {
+	data, err := s.readFile(filepath.Join(metaDir, pendingFile))
+	if err != nil {
+		if isNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var snap Snapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		return nil, err
+	}
+	return &snap, nil
+}
+
+// ClearPending 删除未完成快照
+func (s *Store) ClearPending() error {
+	if err := s.fs.Remove(filepath.Join(metaDir, pendingFile)); err != nil && !isNotFound(err) {
 		return err
 	}
 	return nil

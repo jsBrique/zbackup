@@ -83,6 +83,7 @@ zbackup -p 13022 -s ./src/ -d user@host:/data/
 - 支持 glob 式 `--exclude`，例如 `--exclude "*.tmp" --exclude "cache/*"`。
 - `--dry-run` 可先确认计划（会输出详细 action/path/size）。
 - 全量模式（`--mode full`）会同步删除目的端多余文件。
+- 传输过程中会持续在目标端 `.zbackup/pending.json` 中更新进度；若意外中断，下次运行会自动读取该文件并从上次完成的位置继续。
 
 ### 测试
 

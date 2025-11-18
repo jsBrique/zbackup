@@ -17,13 +17,14 @@ import (
 
 // Executor 负责执行传输计划
 type Executor struct {
-	SourceFS endpoint.FileSystem
-	DestFS   endpoint.FileSystem
-	Src      endpoint.Endpoint
-	Dst      endpoint.Endpoint
-	Checksum endpoint.ChecksumAlgo
-	Logger   *slog.Logger
-	Progress ui.Progress
+	SourceFS  endpoint.FileSystem
+	DestFS    endpoint.FileSystem
+	Src       endpoint.Endpoint
+	Dst       endpoint.Endpoint
+	Checksum  endpoint.ChecksumAlgo
+	Logger    *slog.Logger
+	Progress  ui.Progress
+	OnSuccess func(item TransferItem, meta endpoint.FileMeta)
 }
 
 // Result 描述执行结果
@@ -56,6 +57,9 @@ func (e *Executor) Execute(ctx context.Context, plan Plan) (Result, error) {
 			} else {
 				e.Logger.Info("传输完成", "path", item.RelPath, "size", item.Meta.Size)
 				result.Success[item.RelPath] = meta
+				if e.OnSuccess != nil {
+					e.OnSuccess(item, meta)
+				}
 			}
 		case ActionDelete:
 			if err := e.DestFS.Remove(item.RelPath); err != nil {
@@ -69,6 +73,9 @@ func (e *Executor) Execute(ctx context.Context, plan Plan) (Result, error) {
 			} else {
 				result.Success[item.RelPath] = item.Meta
 				e.Logger.Debug("创建目录成功", "path", item.RelPath)
+				if e.OnSuccess != nil {
+					e.OnSuccess(item, item.Meta)
+				}
 			}
 		case ActionSkip:
 			e.Logger.Debug("跳过未变化文件", "path", item.RelPath, "reason", item.Reason)

@@ -36,20 +36,38 @@ func Run(ctx context.Context, cfg *BackupConfig) error {
 	if err != nil {
 		return fmt.Errorf("读取历史快照失败: %w", err)
 	}
+	pendingSnap, err := store.LoadPending()
+	if err != nil {
+		return fmt.Errorf("读取未完成快照失败: %w", err)
+	}
+	baseSnap := lastSnap
+	if pendingSnap != nil {
+		cfg.SnapshotName = pendingSnap.Name
+		baseSnap = pendingSnap
+	}
 
 	srcFiles, err := srcFS.List(cfg.Excludes)
 	if err != nil {
 		return fmt.Errorf("扫描源目录失败: %w", err)
 	}
 
-	plan := BuildPlan(srcFiles, lastSnap, *cfg)
+	plan := BuildPlan(srcFiles, baseSnap, *cfg)
 
 	logWriter, logPath, err := prepareLogWriter(cfg, destFS)
 	if err != nil {
 		return err
 	}
+	var progress ui.Progress
+	stdWriter := io.Writer(os.Stdout)
+	if cfg.NoProgress {
+		progress = ui.NoopProgress{}
+	} else {
+		bar := ui.NewBarProgress(os.Stdout)
+		progress = bar
+		stdWriter = bar.WrapWriter(os.Stdout)
+	}
 	var logWriters []io.Writer
-	logWriters = append(logWriters, os.Stdout)
+	logWriters = append(logWriters, stdWriter)
 	if logWriter != nil {
 		logWriters = append(logWriters, logWriter)
 	}
@@ -62,7 +80,6 @@ func Run(ctx context.Context, cfg *BackupConfig) error {
 	if logPath != "" {
 		logger.Info("日志写入路径", "dest", logPath)
 	}
-
 	if cfg.DryRun {
 		logger.Info("Dry-run 模式，只展示计划", "files", plan.TotalFiles, "bytes", plan.TotalBytes)
 		for _, item := range plan.Items {
@@ -71,12 +88,7 @@ func Run(ctx context.Context, cfg *BackupConfig) error {
 		return nil
 	}
 
-	var progress ui.Progress
-	if cfg.NoProgress {
-		progress = ui.NoopProgress{}
-	} else {
-		progress = ui.NewBarProgress(os.Stdout)
-	}
+	checkpoint := newCheckpoint(store, baseSnap, cfg.SnapshotName, cfg.Source, cfg.Dest)
 
 	executor := transfer.Executor{
 		SourceFS: srcFS,
@@ -86,14 +98,22 @@ func Run(ctx context.Context, cfg *BackupConfig) error {
 		Checksum: cfg.Checksum,
 		Logger:   logger.Logger,
 		Progress: progress,
+		OnSuccess: func(item transfer.TransferItem, meta endpoint.FileMeta) {
+			if err := checkpoint.Record(meta); err != nil {
+				logger.Warn("写入增量进度失败", "path", meta.RelPath, "err", err)
+			}
+		},
 	}
 
 	result, execErr := executor.Execute(ctx, plan)
+	if err := checkpoint.Flush(); err != nil {
+		logger.Warn("刷新进度失败", "err", err)
+	}
 	if execErr != nil {
 		logger.Error("备份过程中出现错误", "err", execErr)
 	}
 
-	finalFiles := mergeSnapshot(lastSnap, plan, result)
+	finalFiles := mergeSnapshot(baseSnap, plan, result)
 	snapshot := meta.Snapshot{
 		Name:       cfg.SnapshotName,
 		CreatedAt:  time.Now().UTC(),
@@ -107,7 +127,11 @@ func Run(ctx context.Context, cfg *BackupConfig) error {
 		return err
 	}
 	if execErr != nil {
+		logger.Warn("备份未完成，保留进度以供继续", "snapshot", snapshot.Name)
 		return execErr
+	}
+	if err := store.ClearPending(); err != nil {
+		logger.Warn("清理未完成快照失败", "err", err)
 	}
 	logger.Info("备份完成", "snapshot", snapshot.Name, "files", len(snapshot.Files))
 	return nil
