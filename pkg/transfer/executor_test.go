@@ -32,7 +32,7 @@ func TestExecutorExecute(t *testing.T) {
 		DestFS:   dstFS,
 		Src:      endpoint.Endpoint{Type: endpoint.EndpointLocal, Path: srcDir},
 		Dst:      endpoint.Endpoint{Type: endpoint.EndpointLocal, Path: dstDir},
-		Checksum: endpoint.ChecksumNone,
+		Checksum: endpoint.ChecksumSHA256,
 		Logger:   slogDiscard(),
 		Progress: ui.NoopProgress{},
 	}
@@ -74,6 +74,77 @@ func TestExecutorExecute(t *testing.T) {
 	}
 }
 
+func TestExecutorRemoteHash(t *testing.T) {
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	content := []byte("remote hash data")
+	if err := os.MkdirAll(srcDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "file.txt"), content, 0o644); err != nil {
+		t.Fatalf("write src: %v", err)
+	}
+	srcFS := mockRemoteFS{
+		LocalFS: endpoint.NewLocalFS(srcDir),
+		Algo:    endpoint.ChecksumSHA256,
+	}
+	dstFS := endpoint.NewLocalFS(dstDir)
+	exec := Executor{
+		SourceFS: srcFS,
+		DestFS:   dstFS,
+		Src:      endpoint.Endpoint{Type: endpoint.EndpointRemote, Path: srcDir},
+		Dst:      endpoint.Endpoint{Type: endpoint.EndpointLocal, Path: dstDir},
+		Checksum: endpoint.ChecksumSHA256,
+		Logger:   slogDiscard(),
+		Progress: ui.NoopProgress{},
+	}
+	plan := Plan{}
+	plan.AddItem(TransferItem{
+		RelPath: "file.txt",
+		Meta: endpoint.FileMeta{
+			RelPath: "file.txt",
+			Size:    int64(len(content)),
+			ModTime: time.Now(),
+		},
+		Action: ActionDownload,
+	})
+	result, err := exec.Execute(context.Background(), plan)
+	if err != nil {
+		t.Fatalf("execute failed: %v", err)
+	}
+	meta, ok := result.Success["file.txt"]
+	if !ok {
+		t.Fatalf("file not marked success")
+	}
+	if meta.Checksum == "" {
+		t.Fatalf("checksum missing, remote hash not used")
+	}
+}
+
 func slogDiscard() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+type mockRemoteFS struct {
+	*endpoint.LocalFS
+	Algo endpoint.ChecksumAlgo
+}
+
+func (m mockRemoteFS) ComputeRemoteHash(relPath string, algo endpoint.ChecksumAlgo) ([]byte, error) {
+	if algo != m.Algo {
+		return nil, endpoint.ErrHashCommandUnavailable
+	}
+	reader, err := m.LocalFS.Open(relPath)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	h := newHash(algo)
+	if h == nil {
+		return nil, endpoint.ErrHashCommandUnavailable
+	}
+	if _, err := io.Copy(h, reader); err != nil {
+		return nil, err
+	}
+	return h.Sum(nil), nil
 }

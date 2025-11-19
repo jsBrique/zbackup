@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/sha1"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -22,6 +24,12 @@ import (
 type RemoteFS struct {
 	endpoint    Endpoint
 	controlPath string
+	hashCaps    map[ChecksumAlgo]hashCapability
+}
+
+type hashCapability struct {
+	known     bool
+	supported bool
 }
 
 // NewRemoteFS 创建远端文件系统
@@ -33,6 +41,11 @@ func NewRemoteFS(ep Endpoint) *RemoteFS {
 	return &RemoteFS{
 		endpoint:    ep,
 		controlPath: control,
+		hashCaps: map[ChecksumAlgo]hashCapability{
+			ChecksumMD5:    {known: false},
+			ChecksumSHA1:   {known: false},
+			ChecksumSHA256: {known: false},
+		},
 	}
 }
 
@@ -351,4 +364,54 @@ func isFindPrintfUnsupported(output []byte) bool {
 func supportsControlMaster() bool {
 	// Windows 版 OpenSSH 尚未实现控制主连接
 	return runtime.GOOS != "windows"
+}
+
+func isHashCmdUnavailable(output []byte) bool {
+	text := strings.ToLower(string(output))
+	return strings.Contains(text, "not found") || strings.Contains(text, "no such file") || strings.Contains(text, "command not")
+}
+func (r *RemoteFS) ComputeRemoteHash(relPath string, algo ChecksumAlgo) ([]byte, error) {
+	if algo == ChecksumNone {
+		return nil, errors.New("checksum none unsupported for remote hash")
+	}
+	cap := r.hashCaps[algo]
+	if cap.known && !cap.supported {
+		return nil, ErrHashCommandUnavailable
+	}
+	cmdName := hashCommand(algo)
+	if cmdName == "" {
+		return nil, ErrHashCommandUnavailable
+	}
+	remote := path.Join(r.endpoint.Path, filepathToPosix(relPath))
+	output, err := r.runSSHCommand(fmt.Sprintf("%s %s", cmdName, shellQuote(remote)))
+	if err != nil {
+		if isHashCmdUnavailable(output) {
+			r.hashCaps[algo] = hashCapability{known: true, supported: false}
+			return nil, ErrHashCommandUnavailable
+		}
+		return nil, err
+	}
+	fields := strings.Fields(string(output))
+	if len(fields) == 0 {
+		return nil, fmt.Errorf("远端校验输出异常: %s", string(output))
+	}
+	sum, err := hex.DecodeString(fields[0])
+	if err != nil {
+		return nil, err
+	}
+	r.hashCaps[algo] = hashCapability{known: true, supported: true}
+	return sum, nil
+}
+
+func hashCommand(algo ChecksumAlgo) string {
+	switch algo {
+	case ChecksumMD5:
+		return "md5sum"
+	case ChecksumSHA1:
+		return "sha1sum"
+	case ChecksumSHA256:
+		return "sha256sum"
+	default:
+		return ""
+	}
 }

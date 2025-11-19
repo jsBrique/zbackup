@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"crypto/sha1"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -108,21 +109,34 @@ func (e *Executor) copyFile(item TransferItem) (endpoint.FileMeta, error) {
 	var writers []io.Writer
 	writers = append(writers, writer, progressWriter{progress: e.Progress})
 	var srcHash hash.Hash
+	var srcSum []byte
 	if e.Checksum != endpoint.ChecksumNone {
-		srcHash = newHash(e.Checksum)
-		if srcHash != nil {
-			writers = append(writers, srcHash)
+		if sum, err := e.computeRemoteHash(e.SourceFS, item.RelPath); err == nil {
+			srcSum = sum
+		} else {
+			if !errors.Is(err, endpoint.ErrHashCommandUnavailable) {
+				e.Logger.Warn("远端源校验失败，回退本地计算", "path", item.RelPath, "err", err)
+			}
+			srcHash = newHash(e.Checksum)
+			if srcHash != nil {
+				writers = append(writers, srcHash)
+			}
 		}
 	}
 	multi := io.MultiWriter(writers...)
 	if _, err := io.Copy(multi, reader); err != nil {
 		return endpoint.FileMeta{}, err
 	}
-	if e.Checksum == endpoint.ChecksumNone || srcHash == nil {
+	if e.Checksum == endpoint.ChecksumNone {
 		return item.Meta, nil
 	}
-	srcSum := srcHash.Sum(nil)
-	destSum, err := e.computeChecksumOnDest(item.RelPath)
+	if srcSum == nil && srcHash != nil {
+		srcSum = srcHash.Sum(nil)
+	}
+	if srcSum == nil {
+		return endpoint.FileMeta{}, fmt.Errorf("无法计算源端校验和: %s", item.RelPath)
+	}
+	destSum, err := e.computeDestChecksum(item.RelPath)
 	if err != nil {
 		return endpoint.FileMeta{}, err
 	}
@@ -134,8 +148,17 @@ func (e *Executor) copyFile(item TransferItem) (endpoint.FileMeta, error) {
 	return meta, nil
 }
 
-func (e *Executor) computeChecksumOnDest(relPath string) ([]byte, error) {
-	reader, err := e.DestFS.Open(relPath)
+func (e *Executor) computeDestChecksum(relPath string) ([]byte, error) {
+	if sum, err := e.computeRemoteHash(e.DestFS, relPath); err == nil {
+		return sum, nil
+	} else if !errors.Is(err, endpoint.ErrHashCommandUnavailable) {
+		e.Logger.Warn("远端目标校验失败，回退本地读取", "path", relPath, "err", err)
+	}
+	return e.computeHashByReading(e.DestFS, relPath)
+}
+
+func (e *Executor) computeHashByReading(fs endpoint.FileSystem, relPath string) ([]byte, error) {
+	reader, err := fs.Open(relPath)
 	if err != nil {
 		return nil, err
 	}
@@ -148,6 +171,14 @@ func (e *Executor) computeChecksumOnDest(relPath string) ([]byte, error) {
 		return nil, err
 	}
 	return h.Sum(nil), nil
+}
+
+func (e *Executor) computeRemoteHash(fs endpoint.FileSystem, relPath string) ([]byte, error) {
+	hasher, ok := fs.(endpoint.RemoteHashFS)
+	if !ok || e.Checksum == endpoint.ChecksumNone {
+		return nil, endpoint.ErrHashCommandUnavailable
+	}
+	return hasher.ComputeRemoteHash(relPath, e.Checksum)
 }
 
 func newHash(algo endpoint.ChecksumAlgo) hash.Hash {

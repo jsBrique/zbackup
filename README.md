@@ -1,10 +1,35 @@
 ## zbackup
 
-基于 Go 编写的命令行增量备份工具，所有数据通过 SSH/SCP 通道传输，所有快照、日志统一落在目标端 `.zbackup/` 目录。支持本地 ↔ 远端双向备份、全量/增量切换、完整目录结构同步（包含空目录）、友好处理中文/空格等特殊字符路径、传输后校验、进度条与详细日志输出。
+zbackup 是一个“像 rsync 一样但更傻瓜”的 SSH 增量备份小工具。它只做一件事：把一个目录完整同步到另一端（本地或远端），然后把状态写入目标端 `.zbackup` 目录，以便以后继续增量。当你在命令行执行一次 zbackup 后，目录里的 `.zbackup/` 将记录所有快照、日志和斩断点信息，下次运行时就能直接接着上次的结果。
 
-警告：自用开源小项目，难免有问题和bug, 工具行为涉及文件增删改，请在自己环境做好充足测试和数据备份再使用，避免不必要的数据丢失，本项目不负责任何使用造成的数据损失和其它风险。
+> ⚠️ **风险提示**：这是一个自用开源小项目，会对目标目录进行创建/覆盖/删除操作。使用前请在非关键数据上充分测试，确保行为符合预期；若因使用本工具造成数据丢失或其它损失，作者概不负责。
+>
+> ⚠️ Windows 平台仅做基本验证，部分行为可能与类 Unix 环境不同，请慎重使用。
 
-windows平台未做充足测试 可能有未知风险
+### 工作原理（通俗版）
+
+1. **识别端点**：`-s/--source`、`-d/--dest` 可以是本地路径，也可以是 `user@host:/path` 格式。zbackup 始终在源端扫描文件，再将变更同步到目标端。
+2. **扫描 & Diff**：源端扫描结果会记录目录/文件/大小/修改时间/校验和（按需），再和目标端 `.zbackup/snapshots/<latest>.json` 对比，得出新增、修改、删除列表。
+3. **生成计划**：把 diff 结果转成 `TransferPlan`，包含 mkdir/upload/download/delete/skip 等动作。支持 `--mode full`（全量，删除目的端冗余）与 `--mode incr`（增量，默认）。
+4. **传输 & 校验**：所有操作都通过 SSH 完成（可给 `-p/-i/-o`）。传输成功后按配置的算法计算源/目的校验和，确保一致后才算完成。
+5. **快照 & 断点**：执行过程中实时写入 `.zbackup/pending.json`，即便断电/中断也能从该文件继续。任务结束会输出新的快照 JSON 和日志文件，更新 `.zbackup/latest`。
+6. **进度条 & 日志**：终端显示单行进度条（含当前文件和 Mbps 速率）；日志输出前会清除进度行，避免挤在一行。日志和快照都在目标端 `.zbackup` 下，方便调试与追踪。
+
+### 为什么要把快照写在目标端？
+
+- 换电脑、换位置都能继续，因为所有状态都保存在目标端。
+- 断点续传自然可用：`.zbackup/pending.json` 会记住已完成的文件，下次开机后无需任何手工操作。
+- 多个备份任务可共存，每个快照可按时间戳或自定义名字分辨。
+
+### 功能摘要
+
+- **传输方式**：完全基于 SSH，支持所有常见的 SSH 选项；无需额外开放端口。
+- **双向同步**：既可拉取远端到本地，也可把本地推送到远端。
+- **增量/全量**：增量模式只同步变化的文件；全量模式会删除目的端多出来的文件，保持与源端一致。
+- **断点续传**：执行时持续把进度写进 `.zbackup/pending.json`，中断后自动读取继续。
+- **校验算法**：默认 `sha256`，也可选择 `md5/sha1/none`；校验既用于增量判断，也用于传输后验证。
+- **目录保持**：会同步空目录，路径中的空格、中文等特殊字符也会被正确识别。
+- **日志与进度**：终端进度条显示百分比、文件数、实时 Mbps；日志默认写在 `.zbackup/logs/` 下，也可通过 `--log-file` 指向本地文件。
 
 ### 安装
 
@@ -12,7 +37,7 @@ windows平台未做充足测试 可能有未知风险
 go install ./cmd/zbackup
 ```
 
-或直接在源码目录内运行：
+或直接在源码目录运行：
 
 ```bash
 go run ./cmd/zbackup --help
@@ -32,27 +57,27 @@ zbackup -p 13022 -s ./src/ -d user@host:/data/
 
 | 参数 | 说明 |
 | --- | --- |
-| `-s, --source` / `-d, --dest` | 指定源/目的路径（本地或 `[user@]host:/path`） |
-| `-p, --port` / `-i, --identity` / `-o, --ssh-option` | 透传 SSH 端口、私钥与额外参数 |
+| `-s, --source` / `-d, --dest` | 指定源/目标路径（本地或 `[user@]host:/path`） |
+| `-p, --port` / `-i, --identity` / `-o, --ssh-option` | SSH 端口、私钥、附加选项 |
 | `-m, --mode` | `full` / `incr`，默认增量 |
-| `--checksum` | `none` / `md5` / `sha1` / `sha256`，默认 sha256 |
-| `--exclude` | 排除 glob 模式，可多次 |
-| `--no-progress` | 关闭进度条（CI/脚本场景） |
-| `--log-file` / `--log-level` | 自定义日志输出位置与级别（默认写入目标端 `.zbackup/logs/`） |
-| `--dry-run` | 只显示计划、不执行传输 |
-| `--snapshot-name` | 自定义快照名称，不填则使用 UTC 时间戳 |
+| `--checksum` | `none` / `md5` / `sha1` / `sha256`，默认 `sha256` |
+| `--exclude` | 支持 glob 的排除规则，可多次传入 |
+| `--no-progress` | 关闭终端进度条（适合 CI） |
+| `--log-file` / `--log-level` | 自定义日志文件和级别（默认目标端 `.zbackup/logs/`） |
+| `--dry-run` | 仅展示计划，不实际传输 |
+| `--snapshot-name` | 自定义快照名称（默认 UTC 时间戳） |
 
-### 架构说明
+### 架构说明（更细一点）
 
-- `cmd/zbackup`：CLI 入口，使用 Cobra 解析参数，构造 `core.BackupConfig`。
-- `pkg/core`：任务编排（扫描 → Diff → 传输 → 校验 → 快照/日志写入）。
-- `pkg/endpoint`：抽象本地与远端文件系统（远端通过 SSH 命令实现 `find`、`cat`、`stat` 等操作）。
-- `pkg/meta`：在目标端 `.zbackup` 下读写快照与 `latest` 指针。
-- `pkg/transfer`：根据计划串流复制文件、计算校验和、处理删除。
-- `pkg/ui`：进度条封装，默认使用 `progressbar`（`--no-progress` 时降级为空实现）。
-- `pkg/logging`：统一的 slog 包装，支持多 writer。
+- `cmd/zbackup`：Cobra CLI 入口，解析参数、校验配置。
+- `pkg/core`：核心流程；负责调用扫描、diff、传输、日志与快照，内置 `checkpoint` 机制持续落盘未完成进度。
+- `pkg/endpoint`：表达本地/远端端点，远端通过 SSH 命令执行 `find/stat/cat` 等。
+- `pkg/transfer`：执行传输计划；支持并发、校验、mkdir/delete/skip 等动作，并通过回调将成功记录反馈给 `core`。
+- `pkg/meta`：管理 `.zbackup` 下的快照、latest、pending 文件。
+- `pkg/ui`：控制台进度条和日志输出互斥，保持单行刷新。
+- `pkg/logging`：对 `log/slog` 的轻包装，便于输出到多个 Writer。
 
-元数据结构（`meta.Snapshot`）：
+元数据结构示例（`meta.Snapshot`）：
 
 ```json
 {
@@ -65,50 +90,47 @@ zbackup -p 13022 -s ./src/ -d user@host:/data/
       "rel_path": "foo.txt",
       "size": 1024,
       "mod_time": "...",
-      "checksum": "..."
+      "checksum": "...",
+      "is_dir": false
     }
   },
   "completed": true
 }
 ```
 
-### 日志与快照落盘
+### 日志与快照
 
 - 默认在目标端 `.zbackup/logs/backup-<snapshot>.log` 写入完整执行日志。
-- 快照保存在 `.zbackup/snapshots/<snapshot>.json`，并通过 `.zbackup/latest` 记录上一次成功快照。
-- 自定义 `--log-file` 时，日志写到本地指定路径，快照仍落在目标端。
+- 快照保存在 `.zbackup/snapshots/<snapshot>.json`，最新记录由 `.zbackup/latest` 指向。
+- 执行过程中持续更新 `.zbackup/pending.json`，异常退出后可继续。
+- 指定 `--log-file` 时，日志写到本地文件，但快照仍落在目标端。
 
-### 进阶
+### 进阶技巧
 
-- 支持 glob 式 `--exclude`，例如 `--exclude "*.tmp" --exclude "cache/*"`。
-- `--dry-run` 可先确认计划（会输出详细 action/path/size）。
-- 全量模式（`--mode full`）会同步删除目的端多余文件。
-- 传输过程中会持续在目标端 `.zbackup/pending.json` 中更新进度；若意外中断，下次运行会自动读取该文件并从上次完成的位置继续。
+- `--exclude "*.tmp" --exclude "cache/*"` 可排除多种模式。
+\- `--dry-run` 查看计划，不传输；输出包括每个 action、路径和大小。
+- 全量模式（`--mode full`）会同步删除目的端多余文件，适合“镜像备份”场景。
+- 手动传输过程中可随时退出，下次运行会从 `.zbackup/pending.json` 接着同步。
 
-### 测试
-
-项目自带单元测试覆盖核心模块：
+### 测试与交叉编译
 
 ```bash
 go test ./...
 ```
 
-### 交叉编译
-
-仓库根目录提供了 PowerShell 脚本便于一次性生成常见平台的二进制：
+仓库提供 PowerShell 脚本帮助生成常见平台的二进制：
 
 ```powershell
-# Linux/AMD64 单独编译
-pwsh ./build-linux.ps1
-
-# 一次性编译 Linux / macOS / Windows 主流架构
-pwsh ./build-all.ps1
+pwsh ./build-linux.ps1      # 仅编译 Linux/AMD64
+pwsh ./build-all.ps1        # Linux/macOS/Windows 主流架构
 ```
 
-生成结果统一放在 `build/` 目录下。
+生成的文件都会放在 `build/` 目录。
 
 ### 开发提示
 
-- 所有 SSH 命令通过 `endpoint.RemoteFS` 抽象，后续可替换为内建 SSH/SFTP。
-- 增量判断默认以 size+mtime 为主，开启校验和后会在传输完成后保存 hash，重复运行保证幂等。
-- 日志、快照写入都使用统一的 `FileSystem`，因此远端/本地行为一致；重试时可直接利用 `.zbackup` 信息继续增量。
+- 所有 SSH 行为目前通过外部 `ssh` 命令完成，后续可替换为内建 SSH/SFTP。
+- 增量判断默认基于 size+mtime，若启用校验和，会在传输完成后保存 hash，幂等更强。
+- Fast fail：出现错误时日志中会列出失败的文件，不会影响已成功的文件；再次运行会自动重试失败文件。
+- 由于所有状态都在目标端 `.zbackup` 下，你可以把该目录备份或版本控制起来，方便回滚。
+
